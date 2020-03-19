@@ -6,12 +6,7 @@ module srv6 (
 	     input wire [511:0] din,
 	     input wire 	valid,
 	     output reg [511:0] dout,
-	     output reg 	we,
-	     // packet buffer
-	     output reg [511:0] fifo_d,
-	     output reg 	fifo_we,
-	     input wire [511:0] fifo_q,
-	     output reg 	fifo_rd
+	     output reg 	we
 );
 
    reg [3:0] 			 version;
@@ -33,6 +28,14 @@ module srv6 (
    reg [127:0] 			 last_segment;
    reg [127:0] 			 active_segment;
 
+   wire [31:0] 			 buf_length;
+   reg [31:0] 			 buf_raddr;
+   reg [31:0] 			 buf_waddr;
+   reg [511:0] 			 buf_d;
+   wire [511:0]			 buf_q;
+   reg 				 buf_we;
+   reg 				 buf_oe;
+
    reg [7:0] 			 state;
    reg [7:0] 			 segment_ptr;
    reg [15:0] 			 recv_bytes;
@@ -47,7 +50,6 @@ module srv6 (
       case(state)
 	IDLE: begin
 	   we <= 1'b0;
-	   fifo_we <= 1'b0;
 	   recv_bytes <= 15'd0;
 	   if(valid == 1'b1) begin
 	      version             <= din[511:508];
@@ -59,6 +61,7 @@ module srv6 (
 	      source_address      <= din[447:320];
 	      destination_address <= din[319:192]; // or active segment
 
+	      // keep data into registers assumed SRH
 	      srh_next_header  <= din[191:184];
 	      srh_hdr_ext_len  <= din[183:176];
 	      srh_routing_type <= din[175:168];
@@ -68,54 +71,54 @@ module srv6 (
 	      srh_tag          <= din[143:128];
 	      last_segment     <= din[127:0];
 	      
-	      if (din[463:456] == 43) begin // SR header exists (next_header == 43)
+	      if (din[463:456] == 43 && din[175:168] == 4) begin
+		 // SR header exists (next_header == 43) and segment routing (srh_routing_type == 4)
 		 segment_ptr      <= din[167:160] - 1;
 		 state <= RECV_ACTIVE_SEGMENT;
-		 fifo_rd <= 1'b0;
 	      end else begin
 		 state <= SEND_HEADER;
-		 fifo_rd <= 1'b1; // available fifo data at next next state
 	      end
 	      recv_bytes <= 64;
-	   end else begin // if (valid == 1'b1)
-	      fifo_rd <= 1'b0;
-	   end
+	   end // if (valid == 1'b1)
+	   buf_raddr <= 0;
+	   buf_waddr <= 0;
+	   buf_we <= 1'b0;
 	end // case: IDLE
 
 	RECV_ACTIVE_SEGMENT: begin
 	   we <= 1'b0; // not to send
+	   
+	   if(valid == 1'b1) begin
+	      // preserve received data
+	      if(recv_bytes < payload_length) begin
+		 recv_bytes <= recv_bytes + 64;
+		 buf_we <= 1'b1;
+		 buf_d <= din;
+	      end else begin
+		 buf_we <= 1'b0;
+	      end
 
-	   // preserve received data
-	   if(recv_bytes < payload_length) begin
-	      recv_bytes <= recv_bytes + 64;
-	      fifo_we <= 1'b1;
-	      fifo_d <= din;
-	   end else begin
-	      fifo_we <= 1'b0;
-	   end
-
-	   // get destination address
-	   if (srh_segment_left == 1) begin
-	      destination_address <= last_segment;
-	      srh_segment_left <= srh_segment_left - 1;
-	      state <= SEND_HEADER;
-	      fifo_rd <= 1'b1; // available fifo data at next next state
-	   end else if (srh_segment_left > 1 && segment_ptr < 4) begin
-	      srh_segment_left <= srh_segment_left - 1;
-	      state <= SEND_HEADER;
-	      fifo_rd <= 1'b1; // available fifo data at next next state
-	      if(segment_ptr == 0)
-		destination_address <= din[511:384];
-	      else if(segment_ptr == 1)
-		destination_address <= din[383:256];
-	      else if(segment_ptr == 2)
-		destination_address <= din[255:128];
-	      else if(segment_ptr == 3)
-		destination_address <= din[127:0];
-	   end else begin // if (srh_segment_left > 1 && segment_ptr < 4)
-	      segment_ptr <= segment_ptr - 4;
-	      fifo_rd <= 1'b0;
-	   end // else: !if(srh_segment_left > 1 && segment_ptr < 4)
+	      // get destination address
+	      if (srh_segment_left == 1) begin
+		 destination_address <= last_segment;
+		 srh_segment_left <= srh_segment_left - 1;
+		 state <= SEND_HEADER;
+	      end else if (srh_segment_left > 1 && segment_ptr < 4) begin
+		 srh_segment_left <= srh_segment_left - 1;
+		 state <= SEND_HEADER;
+		 if(segment_ptr == 0)
+		   destination_address <= din[511:384];
+		 else if(segment_ptr == 1)
+		   destination_address <= din[383:256];
+		 else if(segment_ptr == 2)
+		   destination_address <= din[255:128];
+		 else if(segment_ptr == 3)
+		   destination_address <= din[127:0];
+	      end else begin // if (srh_segment_left > 1 && segment_ptr < 4)
+		 segment_ptr <= segment_ptr - 4;
+	      end // else: !if(srh_segment_left > 1 && segment_ptr < 4)
+	      
+	   end // if (valid == 1'b1)
 	   
 	end // case: RECV_ACTIVE_SEGMENT
 
@@ -141,39 +144,33 @@ module srv6 (
 	   dout[143:128] <= srh_tag;
 	   dout[127:0]   <= last_segment;
 
-	   if(recv_bytes < payload_length) begin
+	   if(valid == 1'b1 && recv_bytes < payload_length) begin
 	      recv_bytes <= recv_bytes + 64;
-	      fifo_we <= 1'b1;
-	      fifo_d <= din;
+	      buf_we <= 1'b1;
+	      buf_d <= din;
 	   end else begin
-	      fifo_we <= 1'b0;
+	      buf_we <= 1'b0;
 	   end
-	   fifo_rd <= 1'b1;
 
 	   state <= SEND_DATA;
+	   buf_raddr <= buf_raddr + 1;
 	end
 
 	SEND_DATA: begin
+	   // TODO: consider the case when buf_raddr come up buf_waddr
 	   
 	   // preserve received data
-	   if(recv_bytes < payload_length) begin
+	   if(valid == 1'b1 && recv_bytes < payload_length) begin
 	      recv_bytes <= recv_bytes + 64;
-	      fifo_we <= 1'b1;
-	      fifo_d <= din;
+	      buf_we <= 1'b1;
+	      buf_d <= din;
 	   end else begin
-	      fifo_we <= 1'b0;
-	   end
-
-	   // prepare next next data
-	   if(send_bytes + 128 < payload_length) begin
-	      fifo_rd <= 1'b1;
-	   end else begin
-	     fifo_rd <= 1'b0;
+	      buf_we <= 1'b0;
 	   end
 
 	   if(send_bytes < payload_length) begin
 	      we <= 1'b1; // send data
-	      dout <= fifo_q;
+	      dout <= buf_q;
 	      send_bytes <= send_bytes + 64;
 	   end else begin
 	      we <= 1'b0;
@@ -183,12 +180,24 @@ module srv6 (
 	end // case: SEND_DATA
 
 	default: begin
-	  state <= IDLE;
+	   state <= IDLE;
 	end
 	
       endcase
    end
 
+   simple_dualportram#(.WIDTH(512), .DEPTH(6), .WORDS(64))
+   packet_buffer(.clk(clk),
+		 .reset(reset),
+		 .length(buf_length),
+		 .raddress(buf_raddr),
+		 .waddress(buf_waddr),
+		 .din(buf_d),
+		 .dout(buf_q),
+		 .we(buf_we),
+		 .oe(buf_oe)
+		 );
+     
 endmodule // srv6
    
 
