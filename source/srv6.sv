@@ -1,4 +1,5 @@
 `default_nettype none
+/* verilator lint_off PINCONNECTEMPTY */
 
 module srv6 (
 	     input wire 	clk,

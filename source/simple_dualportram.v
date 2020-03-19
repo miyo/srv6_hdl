@@ -1,4 +1,5 @@
 `default_nettype none
+/* verilator lint_off UNUSED */
 
 module simple_dualportram #( parameter WIDTH = 32, DEPTH = 10, WORDS =1024 )
    (
