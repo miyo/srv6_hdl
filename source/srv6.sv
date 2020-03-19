@@ -26,31 +26,30 @@ module srv6 (
    reg [7:0] 			 srh_flags;
    reg [15:0] 			 srh_tag;
    reg [127:0] 			 last_segment;
-   reg [127:0] 			 active_segment;
 
-   wire [31:0] 			 buf_length;
    reg [31:0] 			 buf_raddr;
    reg [31:0] 			 buf_waddr;
    reg [511:0] 			 buf_d;
    wire [511:0]			 buf_q;
    reg 				 buf_we;
-   reg 				 buf_oe;
 
-   reg [7:0] 			 state;
    reg [7:0] 			 segment_ptr;
    reg [15:0] 			 recv_bytes;
    reg [15:0] 			 send_bytes;
-   
-   localparam IDLE                = 8'd0;
-   localparam RECV_ACTIVE_SEGMENT = 8'd1;
-   localparam SEND_HEADER         = 8'd3;
-   localparam SEND_DATA           = 8'd4;
+
+   typedef enum{
+      IDLE,
+      RECV_ACTIVE_SEGMENT,
+      SEND_HEADER,
+      SEND_DATA
+   } state_type;
+   state_type state;
 
    always @(posedge clk) begin
       case(state)
 	IDLE: begin
 	   we <= 1'b0;
-	   recv_bytes <= 15'd0;
+	   recv_bytes <= 16'd0;
 	   if(valid == 1'b1) begin
 	      version             <= din[511:508];
 	      traffic_class       <= din[507:500];
@@ -189,13 +188,13 @@ module srv6 (
    simple_dualportram#(.WIDTH(512), .DEPTH(6), .WORDS(64))
    packet_buffer(.clk(clk),
 		 .reset(reset),
-		 .length(buf_length),
+		 .length(),
 		 .raddress(buf_raddr),
 		 .waddress(buf_waddr),
 		 .din(buf_d),
 		 .dout(buf_q),
 		 .we(buf_we),
-		 .oe(buf_oe)
+		 .oe(1'b1)
 		 );
      
 endmodule // srv6
